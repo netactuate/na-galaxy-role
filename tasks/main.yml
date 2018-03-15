@@ -1,4 +1,4 @@
-- name: na-compute-node
+- name: NetActuate Compute Node
   na_compute_node:
     hostname: "{{ inventory_hostname }}"
     ssh_public_key: "{{ ssh_public_key }}"
