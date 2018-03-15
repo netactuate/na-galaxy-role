@@ -37,7 +37,9 @@ This role does not depend on any other roles, it is the base role to ensure your
 Example Playbook
 ----------------
 
-This is the minimum you need in a playbook to ensure running state on all nodes in your inventory
+This is the minimum you need in a playbook to ensure running state on all nodes in your inventory  
+along with rest of the Role Variables above.
+
 
 	- name: Running
 	  hosts: all
