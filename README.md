@@ -39,13 +39,13 @@ Example Playbook
 
 This is the minimum you need in a playbook to ensure running state on all nodes in your inventory
 
-- name: Running
-  hosts: all
-  remote_user: root
-  gather_facts: no
-  roles:
-    - role: netactuate-compute-node
-      state: running
+	- name: Running
+	  hosts: all
+	  remote_user: root
+	  gather_facts: no
+	  roles:
+		- role: netactuate-compute-node
+		  state: running
 
 License
 -------
