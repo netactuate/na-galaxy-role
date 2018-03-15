@@ -6,7 +6,7 @@ galaxy_info:
   license: license (GPLv2, CC-BY, etc)
   min_ansible_version: 1.9
   platforms:
-    -name: Fedora
+    - name: Fedora
       versions:
         - 25
         - 26
