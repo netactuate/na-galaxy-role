@@ -8,9 +8,9 @@ galaxy_info:
   platforms:
     -name: Fedora
       versions:
-        -25
-        -26
-        -27
+        - 25
+        - 26
+        - 27
   galaxy_tags:
     - netactuate
     - cloud
