@@ -1,25 +1,21 @@
+---
 galaxy_info:
   author: Dennis Durling
   description: NetActuate Compute Node Controller
   company: NetActuate, Inc.
   license: license (GPLv2, CC-BY, etc)
-  min_ansible_version: 1.2
-
-  github_branch:
-    master
-
+  min_ansible_version: 1.9
   platforms:
     -name: Fedora
       versions:
         -25
         -26
         -27
-
   galaxy_tags:
-    netactuate
-    cloud
-    compute
-    build
-    terminate
-    running
-    stopped
+    - netactuate
+    - cloud
+    - compute
+    - build
+    - terminate
+    - running
+    - stopped
