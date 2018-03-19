@@ -136,424 +136,388 @@ ALLOWED_STATES = ['running', 'present', 'terminated', 'stopped']
 API_ROOT = ''
 
 
-###
-#
-# Section: Helper functions
-#
-##
-def _get_valid_hostname(module):
-    """The user will set the hostname so we have to check if it's valid
-    hostname:   string of an intended hostname
-    Returns:
-        Bool
+class NetActuateComputeState(object):
+    """Net Actuate Compute State class for handling
+    checking and changing state
     """
-    hostname = module.params.get('hostname')
-    if re.match(HOSTNAME_RE, hostname) is None:
-        module.fail_json(msg="Invalid hostname: {0}".format(hostname))
-    return hostname
+    def __init__(self, module=None):
+        """All we take is the configured module, we do the rest here"""
 
+        # Need the module for just about everything
+        self.module = module
 
-def _get_ssh_auth(module):
-    try:
-        ssh_key = module.params.get('ssh_public_key')
-        key = open(ssh_key).read()
-        auth = NodeAuthSSHKey(pubkey=key)
-        return auth.pubkey
-    except Exception as e:
-        module.fail_json(msg="Could not load ssh_public_key for {0},"
-                         "Error was: {1}"
-                         .format(module.params.get('hostname'), str(e)))
+        # Handle auth via auth_token
+        auth_token = self.module.params.get('auth_token')
+        hv_driver = get_driver(Provider.HOSTVIRTUAL)
+        self.conn = hv_driver(auth_token)
 
+        ##
+        # set some local variables used inside most if not all methods
+        ##
+        # from the api connection
+        self.avail_locs = self.conn.list_locations()
+        self.avail_oses = self.conn.list_images()
 
-def _serialize_device(module, device):
-    """Returns a json object describing the node as shown above in RETURN"""
-    device_data = {}
-    device_data['id'] = device.uuid
-    device_data['hostname'] = device.name
-    device_data['state'] = device.state
-    device_data['ip_addresses'] = []
-    for addr in device.public_ips:
-        device_data['ip_addresses'].append(
-            {
-                'address': addr,
-                'address_family': 4,
-                'public': True
-            }
-        )
-    for addr in device.private_ips:
-        device_data['ip_addresses'].append(
-            {
-                'address': addr,
-                'address_family': 4,
-                'public': False
-            }
-        )
-    # Also include each IPs as a key for easier lookup in roles.
-    # Key names:
-    # - public_ipv4
-    # - public_ipv6
-    # - private_ipv4
-    # - private_ipv6 (if there is one)
-    for ipdata in device_data['ip_addresses']:
-        if ipdata['public']:
-            if ipdata['address_family'] == 6:
-                device_data['public_ipv6'] = ipdata['address']
-            elif ipdata['address_family'] == 4:
-                device_data['public_ipv4'] = ipdata['address']
-        elif not ipdata['public']:
-            if ipdata['address_family'] == 6:
-                device_data['private_ipv6'] = ipdata['address']
-            elif ipdata['address_family'] == 4:
-                device_data['private_ipv4'] = ipdata['address']
-    return device_data
+        # directly from the module parameters
+        self.desired_state = self.module.params.get('state').lower()
+        self.mbpkgid = self.module.params.get('mbpkgid')
+        self.os_arg = self.module.params.get('operating_system')
 
+        # from internal methods, these use attributes or module, or both
+        self.hostname = self._check_valid_hostname()
+        self.ssh_key = self._get_ssh_auth()
+        self.image = self._get_os()
+        self.location = self._get_location()
 
-def _get_location(module, avail_locs):
-    """Check if a location is allowed/available
+        # Set our default return components
+        self.node = self._get_node()
+        self.changed = False
 
-    Raises an exception if we can't use it
-    Returns a location object otherwise
-    """
-    loc_arg = module.params.get('location')
-    location = None
-    loc_possible_list = [loc for loc in avail_locs
-                         if loc.name == loc_arg or loc.id == loc_arg]
+    ###
+    # Section: Helper functions that do not modify anything
+    ##
+    def _check_valid_hostname(self):
+        """The user will set the hostname so we have to check if it's
+        valid.
+        Does not return on success
+        Calls fail_json on failure
+        """
+        if re.match(HOSTNAME_RE, self.module.params.get('hostname')) is None:
+            self.module.fail_json(msg="Invalid hostname: {0}"
+                                  .format(self.hostname))
+        return self.module.params.get('hostname')
 
-    if not loc_possible_list:
-        _msg = "Image '%s' not found" % loc_arg
-        module.fail_json(msg=_msg)
-    else:
-        location = loc_possible_list[0]
-    return location
-
-
-def _get_os(module, avail_oses):
-    """Check if provided os is allowed/available
-
-    Raises an exception if we can't use it
-    Returns an image/OS object otherwise
-    """
-    os_arg = module.params.get('operating_system')
-    image = None
-    os_possible_list = [os for os in avail_oses
-                        if os.name == os_arg or os.id == os_arg]
-
-    if not os_possible_list:
-        _msg = "Image '%s' not found" % os_arg
-        module.fail_json(msg=_msg)
-    else:
-        image = os_possible_list[0]
-    return image
-
-
-def _get_node_stub(module, conn, h_params):
-    """Just try to get the node, otherwise return failure"""
-    node_stub = None
-    try:
-        node_stub = conn.ex_get_node(h_params['mbpkgid'])
-    except Exception:
-        # we don't want to fail from this function
-        # just return the default, None
-        pass
-    return node_stub
-
-
-def _wait_for_state(module, conn, h_params, state, timeout=600, interval=10):
-    """Called after do_build_node to wait to make sure it built OK
-    Arguments:
-        conn:            object  libcloud connectionCls
-        node_id:            int     ID of node
-        timeout:            int     timeout in seconds
-        interval:           float   sleep time between loops
-        state:      string  string of the desired state
-    """
-    try_node = None
-    for i in range(0, timeout, int(interval)):
+    def _get_ssh_auth(self):
+        """Figure out the ssh public key for building into the node
+        Returns the public key on success,
+        Calls fail_json on failure
+        """
         try:
-            try_node = conn.ex_get_node(h_params['mbpkgid'])
-            if try_node.state == state:
-                break
+            ssh_key = self.module.params.get('ssh_public_key')
+            key = open(ssh_key).read()
+            auth = NodeAuthSSHKey(pubkey=key)
+            return auth.pubkey
         except Exception as e:
-            module.fail_json(
-                msg="Failed to get updated status for {0}"
-                " Error was {1}".format(h_params['hostname'], str(e)))
-        time.sleep(interval)
-    return try_node
+            self.module.fail_json(msg="Could not load ssh_public_key for {0},"
+                                  "Error was: {1}"
+                                  .format(self.hostname, str(e)))
 
-###
-#
-# End Section: Helper functions
-#
-##
+    def _serialize_node(self):
+        """Returns a json object describing the node as shown in RETURN doc
+        """
+        if self.node is None:
+            self.module.fail_json(
+                msg="Tried to serialize the node for return but it was None")
+        device_data = {}
+        device_data['id'] = self.node.uuid
+        device_data['hostname'] = self.node.name
+        device_data['state'] = self.node.state
+        device_data['ip_addresses'] = []
+        for addr in self.node.public_ips:
+            device_data['ip_addresses'].append(
+                {
+                    'address': addr,
+                    'address_family': 4,
+                    'public': True
+                }
+            )
+        for addr in self.node.private_ips:
+            device_data['ip_addresses'].append(
+                {
+                    'address': addr,
+                    'address_family': 4,
+                    'public': False
+                }
+            )
+        # Also include each IPs as a key for easier lookup in roles.
+        # Key names:
+        # - public_ipv4
+        # - public_ipv6
+        # - private_ipv4
+        # - private_ipv6 (if there is one)
+        for ipdata in device_data['ip_addresses']:
+            if ipdata['public']:
+                if ipdata['address_family'] == 6:
+                    device_data['public_ipv6'] = ipdata['address']
+                elif ipdata['address_family'] == 4:
+                    device_data['public_ipv4'] = ipdata['address']
+            elif not ipdata['public']:
+                if ipdata['address_family'] == 6:
+                    device_data['private_ipv6'] = ipdata['address']
+                elif ipdata['address_family'] == 4:
+                    device_data['private_ipv4'] = ipdata['address']
+        return device_data
 
+    def _get_location(self):
+        """Check if a location is allowed/available
 
-###
-#
-# Section: do_<action>_node functions
-#
-# this includes do_build_node, do_stop_node, do_start_node
-# and do_delete_node, and any others we need later but these
-# should cover it for now
-#
-# All these functions are called from within an ensure_node_<state> functions
-# and perform the actual state changing work on the node
-#
-###
-def do_build_new_node(module, conn, h_params):
-    """Build nodes that have never been built"""
-    # set up params to build the node
-    params = {
-        'mbpkgid': h_params['mbpkgid'],
-        'image': h_params['image'].id,
-        'fqdn': h_params['hostname'],
-        'location': h_params['location'].id,
-        'ssh_key': h_params['ssh_key']
-    }
+        Raises an exception if we can't use it
+        Returns a location object otherwise
+        """
+        loc_arg = self.module.params.get('location')
+        location = None
+        loc_possible_list = [loc for loc in self.avail_locs
+                             if loc.name == loc_arg or loc.id == loc_arg]
 
-    # do it using the api
-    # this injects a job, which might take a minute
-    # so afterward we need to wait for a few seconds
-    # before we call _wait_for_state because that function
-    # requires the DB object to exist and will fail if it doesn't
-    try:
-        conn.connection.request(
-            API_ROOT + '/cloud/server/build',
-            data=json.dumps(params),
-            method='POST'
-        ).object
-    except Exception as e:
-        module.fail_json(msg="Failed to build node for node {0} with: {1}"
-                         .format(h_params['hostname'], str(e)))
-
-    # get the new version of the node, hopefully showing
-    # using wait_for_build_complete defauilt timeout (10 minutes)
-    # first though, sleep for 10 seconds to help ensure we don't fail
-    time.sleep(10)
-    node = _wait_for_state(module, conn, h_params, 'running')
-    changed = True
-    return changed, node
-
-
-def do_build_terminated_node(module, conn, h_params, node_stub):
-    """Build nodes that have been uninstalled
-
-    NOTE: leaving here in case I need some code from here...
-    """
-
-    # set up params to build the node
-    params = {
-        'mbpkgid': node_stub.id,
-        'image': h_params['image'].id,
-        'fqdn': h_params['hostname'],
-        'location': node_stub.extra['location'],
-        'ssh_key': h_params['ssh_key']
-    }
-
-    # do it using the api
-    try:
-        conn.connection.request(
-            API_ROOT + '/cloud/server/build',
-            data=json.dumps(params),
-            method='POST'
-        ).object
-    except Exception:
-        module.fail_json(msg="Failed to build node for mbpkgid {0}"
-                         .format(node_stub.id))
-
-    # get the new version of the node, hopefully showing
-    # that it's built and all that
-
-    # get the new version of the node, hopefully showing
-    # using wait_for_build_complete defauilt timeout (10 minutes)
-    node = _wait_for_state(module, conn, h_params, 'running')
-    changed = True
-    return changed, node
-
-###
-#
-# End Section: do_<action>_node functions
-#
-###
-
-
-###
-#
-# Section: ensure_<state> functions
-#
-# all will build a node if it has never been built.
-# the oddest case would be ensure_terminated (uninstalled) where the node
-# has never been built. This would require building, which will create the node
-# on disk and then do a terminate call since we don't have a "setup_node"
-# type api call that configures the node, get's it's IP, sets up which dom0 it
-# should be on and whatnot.
-#
-###
-def ensure_node_running(module, conn, h_params, node_stub):
-    """Called when we want to just make sure the node is running"""
-    changed = False
-    node = node_stub
-    if node.state != 'running':
-        # first build the node if it is in state 'terminated'
-        if node.state == 'terminated':
-            # do_build_terminated_node handles waiting for it to finish
-            # also note, this call should start it so we don't need to
-            # do it again below
-            changed, node = do_build_terminated_node(module, conn,
-                                                     h_params, node_stub)
+        if not loc_possible_list:
+            _msg = "Image '%s' not found" % loc_arg
+            self.module.fail_json(msg=_msg)
         else:
-            # node is installed so boot it up.
-            running = conn.ex_start_node(node_stub)
+            location = loc_possible_list[0]
+        return location
+
+    def _get_os(self):
+        """Check if provided os is allowed/available
+
+        Raises an exception if we can't use it
+        Returns an image/OS object otherwise
+        """
+        image = None
+        os_possible_list = [os for os in self.avail_oses
+                            if os.name == self.os_arg or os.id == self.os_arg]
+
+        if not os_possible_list:
+            _msg = "Image '%s' not found" % self.os_arg
+            self.module.fail_json(msg=_msg)
+        else:
+            image = os_possible_list[0]
+        return image
+
+    def _get_node(self):
+        """Just try to get the node, otherwise return failure"""
+        node = None
+        try:
+            node = self.conn.ex_get_node(self.mbpkgid)
+        except Exception:
+            # we don't want to fail from this function
+            # just return the default, None
+            pass
+        return node
+
+    ###
+    # Section:  Main functions that will initiate self.node/self.changed updates
+    #           Or they will make updates themseleves
+    ###
+    def wait_for_state(self, wait_state, timeout=600, interval=10):
+        """Called after build_node to wait to make sure it built OK
+        Arguments:
+            conn:            object  libcloud connectionCls
+            node_id:            int     ID of node
+            timeout:            int     timeout in seconds
+            interval:           float   sleep time between loops
+            state:      string  string of the desired state
+        """
+        try_node = None
+        for i in range(0, timeout, int(interval)):
+            try:
+                try_node = self.conn.ex_get_node(self.mbpkgid)
+                if try_node.state == wait_state:
+                    break
+            except Exception as e:
+                self.module.fail_json(
+                    msg="Failed to get updated status for {0}"
+                    " Error was {1}".format(self.hostname, str(e)))
+            time.sleep(interval)
+        self.node = try_node
+        self.changed = True
+
+    def build_node(self):
+        """Build nodes
+        If the node has never been built, it uses only params.
+        Otherwise it uses info from node if possible
+        """
+        # set up params to build the node
+        if self.node is None:
+            # no node exists yet
+            params = {
+                'mbpkgid': self.mbpkgid,
+                'image': self.image.id,
+                'fqdn': self.hostname,
+                'location': self.location.id,
+                'ssh_key': self.ssh_key
+            }
+        else:
+            # node exists
+            params = {
+                'mbpkgid': self.node.id,
+                'image': self.image.id,
+                'fqdn': self.hostname,
+                'location': self.node.extra['location'],
+                'ssh_key': self.ssh_key
+            }
+
+        # do it using the api
+        # this injects a job to create the node logically
+        # which might take a minute so afterward we need to
+        # wait for a few seconds before we call wait_for_state
+        try:
+            self.conn.connection.request(
+                API_ROOT + '/cloud/server/build',
+                data=json.dumps(params),
+                method='POST'
+            ).object
+        except Exception as e:
+            self.module.fail_json(
+                msg="Failed to build node for node {0} with: {1}"
+                .format(self.hostname, str(e)))
+
+        # get the new version of the node, hopefully showing
+        # using wait_for_build_complete defauilt timeout (10 minutes)
+        # first though, sleep for 10 seconds to help ensure we don't fail
+        time.sleep(10)
+
+        # wait for the node to reach the desired state
+        self.wait_for_state('running')
+
+    def start_node(self):
+        """Call API to start up a node
+        """
+        try:
+            response = self.conn.ex_start_node(self.node)
+
             # if we don't get a positive response we need to bail
-            if not running:
-                module.fail_json(msg="Seems we had trouble starting node {0}"
-                                 .format(h_params['hostname']))
-            else:
-                # Seems our command executed successfully
-                # so wait for it to come up.
-                node = _wait_for_state(module, conn, h_params, 'running')
-                changed = True
-    return changed, node
-
-
-def ensure_node_stopped(module, conn, h_params, node_stub):
-    """Called when we want to just make sure that a node is NOT running
-    """
-    changed = False
-    node = node_stub
-    if node.state != 'stopped':
-        stopped = conn.ex_stop_node(node_stub)
-        if not stopped:
-            module.fail_json(msg="Seems we had trouble stopping the node {0}"
-                             .format(h_params['hostname']))
-        else:
-            # wait for the node to say it's stopped.
-            node = _wait_for_state(module, conn, h_params, 'stopped')
-            changed = True
-    return changed, node
-
-
-def ensure_node_present(module, conn, h_params, node_stub):
-    """Called when we want to just make sure that a node is NOT terminated
-    """
-    # default state
-    changed = False
-    node = node_stub
-
-    # only do anything if the node.state == 'terminated'
-    # default is to leave 'changed' as False and return it and the node.
-    if node.state == 'terminated':
-        # otherwise,,, build the node.
-        changed, node = do_build_terminated_node(module, conn, h_params, node_stub)
-    return changed, node
-
-
-def ensure_node_terminated(module, conn, h_params, node_stub):
-    """Ensure the node is not installed, uninstall it if it is installed
-    """
-    # default return values
-    changed = False
-    node = node_stub
-
-    # uninstall the node if it is not showing up as terminated.
-    if node.state != 'terminated':
-        # uninstall the node
-        try:
-            deleted = conn.ex_delete_node(node=node)
+            if not response:
+                self.module.fail_json(
+                    msg="Seems we had trouble starting node {0}"
+                    .format(self.hostname))
         except Exception as e:
-            module.fail_json(msg="Failed to call delete node on {0},"
-                             "with error: {1}"
-                             .format(module.params.get('hostname'), str(e)))
-        if not deleted:
-            module.fail_json(msg="Seems we had trouble deleting the node {0}"
-                             .format(module.params.get('hostname')))
-        else:
-            # wait for the node to say it's terminated
-            node = _wait_for_state(module, conn, h_params, 'terminated')
-            changed = True
-    return changed, node
+            self.module.fail_json(
+                msg="Failed to start node for node {0} with: {1}"
+                .format(self.hostname, str(e)))
 
-###
-#
-# End Section: ensure_node_<state> functions
-#
-###
+        # Seems our command executed successfully
+        # so wait for it to come up.
+        self.wait_for_state('running')
 
+    def stop_node(self):
+        """Call API to stop a running node
+        """
+        try:
+            response = self.conn.ex_stop_node(self.node)
 
-###
-#
-# Section: Main functions
-#
-# includes the main() and ensure_state() functions
-#
-# the main function starts everything off and the
-# ensure_state() function which handles the logic for deciding which
-# ensure_node_<state> function to call and what to pass it.
-# mainly to keep main() clean and simple.
-#
-###
-def ensure_state(module, conn, h_params):
-    """Main function call that will check desired state
-    and call the appropriate function and handle the respones back to main.
+            # if we don't get a positive response we need to bail
+            if not response:
+                self.module.fail_json(
+                    msg="Seems we had trouble stopping node {0}"
+                    .format(self.hostname))
+        except Exception as e:
+            self.module.fail_json(
+                msg="Failed to stop node for node {0} with: {1}"
+                .format(self.hostname, str(e)))
 
-    The called functions will check node state and call state altering
-    functions as needed.
-    """
-    # set default changed to False
-    changed = False
-    # TRY to get the node from the mbpkgid provided (required)
-    # Everything else we call MUST account for node_stub being None.
-    # node_stub being None indicates it has never been built.
-    node_stub = _get_node_stub(module, conn, h_params)
+        # Seems our command executed successfully
+        # so wait for it to come up.
+        self.wait_for_state('stopped')
 
     ###
-    # DIE if the node has never been built and we are being asked to uninstall
-    # we can't uninstall the OS on a node that isn't even in the DB
+    #
+    # Section: ensure_<state> methods
+    #
+    # All methods require that the node be built at least
+    # once so that it is registered
+    #
     ###
-    if not node_stub and h_params['state'] == 'terminated':
-        module.fail_json(msg="Cannot uninstall a node that doesn't exist."
-                         "Please build the package first,"
-                         "then you can uninstall it.")
+    def ensure_node_running(self):
+        """Called when we want to just make sure the node is running
+        Builds node if it's not built
+        Starts node if it's not started
+        """
+        # if the node has never been built, build it and return
+        # since the default state of a newly built node should be
+        # 'running' or it will fail
+        if self.node is None or self.node.state == 'terminated':
+            self.build_node()
+        elif self.node.state != 'running':
+                self.start_node()
 
-    # We only need to do any work if the below conditions exist
-    # otherwise we will return the defaults
-    if node_stub is None or node_stub.state != h_params['state']:
-        # main block here, no else as we would just return
-        # build the node if it doesn't exist
-        # tmp_changed is mainly for 'running' check below since building
-        # a new node will put it in a 'running' state and we want to indicates
-        # that it has changed (since it was built)
-        if node_stub is None:
-            # all  states require the node to be installed so do that first.
-            tmp_changed, node_stub = do_build_new_node(module, conn, h_params)
+    def ensure_node_stopped(self):
+        """Called when we want to just make sure that a node is NOT running
+        Builds node if it's not built
+        Stops node if it's not started
+        """
+        if self.node.state != 'stopped':
+            if self.node.state == 'terminated':
+                self.build_node()
+            self.stop_node()
 
-        # update state based on the node existing
-        if h_params['state'] == 'running':
-            # ensure_running makes sure it is up and running,
-            # making sure it is installed also
-            changed, node_stub = ensure_node_running(module, conn, h_params, node_stub)
-            if 'tmp_changed' in vars():
-                # update changed if we had to build it.
-                changed = tmp_changed
+    def ensure_node_present(self):
+        """Called when we want to just make sure that a node is NOT terminated
+        Meaning that it is at least installed
+        If we have to build it, it will actually be in state 'running'
+        But 'running' is > 'present' so still true...
+        """
+        # only do anything if the node.state == 'terminated'
+        if self.node.state == 'terminated':
+            # build_node will set changed to True after it installs it
+            self.build_node()
 
-        if h_params['state'] == 'stopped':
-            # ensure that the node is stopped, this should include
-            # making sure it is installed also
-            changed, node_stub = ensure_node_stopped(module, conn, h_params, node_stub)
+    def ensure_node_terminated(self):
+        """Ensure the node is not installed, uninstall it if it is installed
+        """
+        # uninstall the node if it is not showing up as terminated.
+        if self.node.state != 'terminated':
+            try:
+                deleted = self.conn.ex_delete_node(node=self.node)
+            except Exception as e:
+                self.module.fail_json(
+                    msg="Failed to call delete node on {0},"
+                    "with error: {1}"
+                    .format(self.hostname, str(e)))
+            if not deleted:
+                self.module.fail_json(
+                    msg="Seems we had trouble deleting the node {0}"
+                    .format(self.hostname))
+            else:
+                # wait for the node to say it's terminated
+                self.wait_for_state('terminated')
 
-        if h_params['state'] == 'present':
-            # ensure that the node is installed, we can determine this by
-            # making sure it is built (not terminated)
-            changed, node_stub = ensure_node_present(module, conn, h_params, node_stub)
+    def __call__(self):
+        """Allows us to call our object from main()
+        Handles everything at a high level
+        by calling the appropriate method and handles
+        the respones back to main other than a failure inside
+        a called method
+        Arguments:  None
 
-        if h_params['state'] == 'terminated':
-            changed, node_stub = ensure_node_terminated(module, conn, h_params, node_stub)
+        Return:     dict containing:
+                    changed:    bool
+                    device:     dict of device data
+        """
+        ###
+        # We should already have our self.node and it should be None
+        # if the node doesn't exist (package never built) or a Node object
+        #
+        # DIE if the node has never been built and we are being asked
+        # to uninstall it since we don't have a node that is even
+        # checkable
+        ###
+        if self.node is None and self.desired_state == 'terminated':
+            self.module.fail_json(
+                msg="Cannot uninstall a node that doesn't exist."
+                "Please build the package first,"
+                "then you can uninstall it.")
 
-    # in order to return, we must have a node object and a status (changed) of
-    # whether or not state has changed to the desired state
-    return {
-        'changed': changed,
-        'device': _serialize_device(module, node_stub)
-    }
+        # We only need to do any work if the below conditions exist
+        # otherwise we will return the defaults
+        if self.node is None or self.node.state != self.desired_state:
+            if self.desired_state == 'running':
+                self.ensure_node_running()
+
+            if self.desired_state == 'stopped':
+                self.ensure_node_stopped()
+
+            if self.desired_state == 'present':
+                self.ensure_node_present()
+
+            if self.desired_state == 'terminated':
+                self.ensure_node_terminated()
+
+        # in order to return, we must have a node object and a status (changed)
+        # whether or not state has changed to the desired state
+        return {
+            'changed': self.changed,
+            'device': self._serialize_node()
+        }
 
 
 def main():
@@ -575,70 +539,28 @@ def main():
         ),
     )
 
-    # TODO: make sure this is worth having
+    # don't proceed without authentication...
     if not module.params.get('auth_token'):
         _fail_msg = ("if HostVirtual API key is not in environment "
                      "variable %s, the auth_token parameter "
                      "is required" % HOSTVIRTUAL_API_KEY_ENV_VAR)
         module.fail_json(msg=_fail_msg)
 
-    auth_token = module.params.get('auth_token')
-
+    # don't proceed without the proper imports
     if not HAS_LIBCLOUD:
         module.fail_json(msg="Failed to import module libcloud")
-
-    hv_driver = get_driver(Provider.HOSTVIRTUAL)
-    conn = hv_driver(auth_token)
-
-    # pass in a list of locations and oses that are allowed to be used.
-    # these can't be in the module instantiation above since they are
-    # likely to change at any given time... not optimal
-    # available locations
-    avail_locs = conn.list_locations()
-
-    # available operating systems
-    avail_oses = conn.list_images()
-
-    ##
-    # get the passed in parameters
-    ##
-    h_params = {}
-
-    # put state into h_params too
-    h_params['state'] = module.params.get('state').lower()
-
-    # get and check the hostname, fail_json on error
-    h_params['hostname'] = _get_valid_hostname(module)
-
-    # make sure we get the ssh_key
-    h_params['ssh_key'] = _get_ssh_auth(module)
-
-    # get the image based on the os ID/Name provided
-    # the get_os function call will fail_json if there is a problem
-    h_params['image'] = _get_os(module, avail_oses)
-
-    # get the location based on the location ID/Name provided
-    # the get_location function call will fail_json on exception
-    # if there is a problem
-    h_params['location'] = _get_location(module, avail_locs)
-
-    # and lastly, supply the mbpkgid
-    h_params['mbpkgid'] = module.params.get('mbpkgid')
 
     try:
         # build_provisioned_node returns a dictionary so we just reference
         # the return value here
-        module.exit_json(**ensure_state(module, conn, h_params))
+        ensure_state = NetActuateComputeState(module=module)
+        module.exit_json(**ensure_state())
     except Exception as e:
-        _fail_msg = ("failed to set machine state for node {0}"
-                     "to {1}. Error was: {2}"
-                     .format(h_params['hostname'], h_params['state'], str(e)))
-        module.fail_json(msg=_fail_msg)
-    ###
-
-    # End Section: Main functions
-    #
-    ###
+        module.fail_json(
+            msg="failed to set machine state for node {0} "
+            "to {1}. Error was: {2}"
+            .format(module.params.get('hostname'),
+                    module.params.get('state'), str(e)))
 
 
 if __name__ == '__main__':
