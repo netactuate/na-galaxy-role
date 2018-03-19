@@ -295,8 +295,8 @@ class NetActuateComputeState(object):
         return node
 
     ###
-    # Section:  Main functions that will initiate self.node/self.changed updates
-    #           Or they will make updates themseleves
+    # Section:  Main functions that will initiate self.node/self.changed
+    #           updates or they will make updates themseleves
     ###
     def wait_for_state(self, wait_state, timeout=600, interval=10):
         """Called after build_node to wait to make sure it built OK
