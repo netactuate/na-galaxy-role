@@ -28,6 +28,8 @@ List of required Role or Host variables
 		FQDN to set and identify host by.
 	auth_token
 		API key from settings page on portal.
+		NOTE: You can also, and probably preferably, set the ENV
+			  variable HOSTVIRTUAL_API_KEY as your API key.
 
 Automatically set Variables
 
