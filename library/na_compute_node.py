@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 #
 # (c) 2018, Dennis Durling <djdtahoe@gmail.com>
-# GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
+# GNU General Public License v3.0+
+# (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
 from __future__ import absolute_import, division, print_function
 __metaclass__ = type
@@ -44,7 +45,8 @@ options:
     description:
       - Either the ID or full name of the OS to be installed on the node.
       - C(operating_system) is required.
-      - NOTE, to many choices to list here. Will provide a script for customers to list OSes.
+      - NOTE, to many choices to list here. Will provide a script for customers
+        to list OSes.
   mbpkgid:
     description:
       - The purchased package ID the node is associated with.
@@ -62,18 +64,21 @@ options:
 '''
 
 EXAMPLES = '''
-# example task/main.yml file with hard coded values
-- name:
-  hv_compute_node:
-    - hostname: www.ansible.com
-    - ssh_public_key: id_rsa.pub
-    - operating_system: Debian 9.0 (PV)
-    - mbpkgid: 5551212
-    - state: running
-  register:
-    - hostvirtual_device_result
-  delegate_to:
-    - localhost
+- name: Running
+  hosts: all
+  remote_user: root
+  gather_facts: no
+  roles:
+    - role: netactuate.netactuate-compute-node
+      state: running
+
+- name: Stopped
+  hosts: all
+  remote_user: root
+  gather_facts: no
+  roles:
+    - role: netactuate.netactuate-compute-node
+      state: stopped
 '''
 
 RETURN = '''
@@ -92,7 +97,7 @@ ip_addresses:
   description: Dictionary of configured IP addresses.
   returned: success
   type: dict
-  sample: '[ { "address": "8.8.8.8", "address_family": "4", "public": "true" } ]'
+  sample: '[{ "address": "8.8.8.8", "address_family": "4", "public": "true" }]'
 private_ipv4:
   description: Private IPv4 Address
   returned: success

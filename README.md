@@ -29,10 +29,17 @@ List of required Role or Host variables
 	auth_token
 		API key from settings page on portal.
 
+Automatically set Variables
+    ansible_host
+        This is set from the role's task file by extracting it from the output
+        of the module on a per host basis. This means you should have this role
+        defined first in your playbooks.
+
 Dependencies
 ------------
 
-This role does not depend on any other roles, it is the base role to ensure your OS is installed and running.
+This role does not depend on any other roles, it is the base role to ensure
+your OS is installed and running.
 
 Example Playbook
 ----------------
