@@ -294,6 +294,19 @@ class NetActuateComputeState(object):
             pass
         return node
 
+    def _get_job(self, job_id):
+        """Get a specific job's status from the api"""
+        params = {'mbpkgid': self.mbpkgid, 'job_id': job_id}
+        try:
+            result = self.conn.connection.request(
+                API_ROOT + '/cloud/serverjob',
+                params=params, method='GET').object
+        except Exception as e:
+            self.module.fail_json(
+                msg="Failed to get job status for node {}, job_id {} "
+                "with error: {}".format(self.hostname, job_id, str(e)))
+        return result
+
     ###
     # Section:  Main functions that will initiate self.node/self.changed
     #           updates or they will make updates themseleves
@@ -321,6 +334,36 @@ class NetActuateComputeState(object):
         self.node = try_node
         self.changed = True
 
+    def wait_for_job_complete(self, result=None, state=None):
+        """Calls _get_job until timeout or status == 5
+        Either fail_json will be called or wait_for_state
+        """
+        timeout = 600
+        interval = 5
+        try:
+            job_id = result['id']
+        except Exception as e:
+            self.module.fail_json(
+                msg="Failed to get job_id from result {} for node {}"
+                .format(self.hostname, result))
+        status = {}
+        for i in range(0, timeout, int(interval)):
+            status = self._get_job(job_id)
+            if status and status['status'] == '5':
+                break
+            time.sleep(interval)
+
+        if status is None or status['status'] != '5':
+            # problem!
+            self.module.fail_json(
+                msg="Failed to get completed status for node {}. "
+                "Desired state was {}, Job status was {}"
+                .format(self.hostname, state, status))
+        else:
+            # call to wait_for_state "should" return very quickly!
+            # wait for the node to reach the desired state
+            self.wait_for_state(state)
+
     def build_node(self):
         """Build nodes
         If the node has never been built, it uses only params.
@@ -346,12 +389,9 @@ class NetActuateComputeState(object):
                 'ssh_key': self.ssh_key
             }
 
-        # do it using the api
-        # this injects a job to create the node logically
-        # which might take a minute so afterward we need to
-        # wait for a few seconds before we call wait_for_state
+        # start the build process and get the job_id in the result
         try:
-            self.conn.connection.request(
+            result = self.conn.connection.request(
                 API_ROOT + '/cloud/server/build',
                 data=json.dumps(params),
                 method='POST'
@@ -361,53 +401,40 @@ class NetActuateComputeState(object):
                 msg="Failed to build node for node {0} with: {1}"
                 .format(self.hostname, str(e)))
 
-        # get the new version of the node, hopefully showing
-        # using wait_for_build_complete defauilt timeout (10 minutes)
-        # first though, sleep for 10 seconds to help ensure we don't fail
-        time.sleep(10)
-
-        # wait for the node to reach the desired state
-        self.wait_for_state('running')
+        # wait for job to complete and state to be verified
+        self.wait_for_job_complete(result=result, state='running')
 
     def start_node(self):
-        """Call API to start up a node
+        """Call API to start a running node
         """
+        params = {'mbpkgid': self.node.id}
         try:
-            response = self.conn.ex_start_node(self.node)
-
-            # if we don't get a positive response we need to bail
-            if not response:
-                self.module.fail_json(
-                    msg="Seems we had trouble starting node {0}"
-                    .format(self.hostname))
+            result = self.conn.connection.request(
+                API_ROOT + '/cloud/server/start', data=json.dumps(params),
+                method='POST').object
         except Exception as e:
             self.module.fail_json(
                 msg="Failed to start node for node {0} with: {1}"
                 .format(self.hostname, str(e)))
 
-        # Seems our command executed successfully
-        # so wait for it to come up.
-        self.wait_for_state('running')
+        # wait for job to complete and state to be verified
+        self.wait_for_job_complete(result=result, state='running')
 
     def stop_node(self):
         """Call API to stop a running node
         """
+        params = {'force': 0, 'mbpkgid': self.node.id}
         try:
-            response = self.conn.ex_stop_node(self.node)
-
-            # if we don't get a positive response we need to bail
-            if not response:
-                self.module.fail_json(
-                    msg="Seems we had trouble stopping node {0}"
-                    .format(self.hostname))
+            result = self.conn.connection.request(
+                API_ROOT + '/cloud/server/shutdown', data=json.dumps(params),
+                method='POST').object
         except Exception as e:
             self.module.fail_json(
                 msg="Failed to stop node for node {0} with: {1}"
                 .format(self.hostname, str(e)))
 
-        # Seems our command executed successfully
-        # so wait for it to come up.
-        self.wait_for_state('stopped')
+        # wait for job to complete and state to be verified
+        self.wait_for_job_complete(result=result, state='stopped')
 
     ###
     #
@@ -452,24 +479,19 @@ class NetActuateComputeState(object):
             self.build_node()
 
     def ensure_node_terminated(self):
-        """Ensure the node is not installed, uninstall it if it is installed
-        """
-        # uninstall the node if it is not showing up as terminated.
-        if self.node.state != 'terminated':
-            try:
-                deleted = self.conn.ex_delete_node(node=self.node)
-            except Exception as e:
-                self.module.fail_json(
-                    msg="Failed to call delete node on {0},"
-                    "with error: {1}"
-                    .format(self.hostname, str(e)))
-            if not deleted:
-                self.module.fail_json(
-                    msg="Seems we had trouble deleting the node {0}"
-                    .format(self.hostname))
-            else:
-                # wait for the node to say it's terminated
-                self.wait_for_state('terminated')
+        """Calls the api endpoint to delete the node and returns the result"""
+        params = {'mbpkgid': self.node.id}
+        try:
+            result = self.conn.connection.request(
+                API_ROOT + '/cloud/server/delete', data=json.dumps(params),
+                method='POST').object
+        except Exception as e:
+            self.module.fail_json(
+                msg="Failed to delete node for node {0} with: {1}"
+                .format(self.hostname, str(e)))
+
+        # wait for job to complete and state to be verified
+        self.wait_for_job_complete(result=result, state='terminated')
 
     def __call__(self):
         """Allows us to call our object from main()

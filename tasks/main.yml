@@ -8,3 +8,6 @@
     state: "{{ state }}"
   register: hostvirtual_device_result
   delegate_to: localhost
+
+- set_fact:
+    ansible_host: "{{ hostvirtual_device_result.device.public_ipv4 }}"
