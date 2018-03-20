@@ -30,6 +30,7 @@ List of required Role or Host variables
 		API key from settings page on portal.
 
 Automatically set Variables
+
     ansible_host
         This is set from the role's task file by extracting it from the output
         of the module on a per host basis. This means you should have this role
