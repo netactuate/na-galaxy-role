@@ -1,4 +1,4 @@
-- name: NetActuate Compute Node
+- name: "NetActuate Compute Node"
   na_compute_node:
     hostname: "{{ inventory_hostname }}"
     ssh_public_key: "{{ ssh_public_key }}"
@@ -8,6 +8,5 @@
     state: "{{ state }}"
   register: hostvirtual_device_result
   delegate_to: localhost
-
-- set_fact:
+  set_fact:
     ansible_host: "{{ hostvirtual_device_result.device.public_ipv4 }}"
