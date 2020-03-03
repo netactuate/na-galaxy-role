@@ -167,9 +167,15 @@ class NetActuateComputeState(object):
         self.desired_state = self.module.params.get('state').lower()
         self.mbpkgid = self.module.params.get('mbpkgid')
         self.os_arg = self.module.params.get('operating_system')
+        self.unique = self.module.params.get('unique')
+        self.plan = self.module.params.get('plan')
+        self.package_billing = self.module.params.get('package_billing')
+        self.contract_id = self.module.params.get('contract_id')
 
         # from internal methods, these use attributes or module, or both
+        # if mbpkgid is not set, but unique and hostname are set, then we will look up mbpkgid by hostname
         self.hostname = self._check_valid_hostname()
+        self.mbpkgid = self._check_valid_mbpkgid()
         self.ssh_key = self._get_ssh_auth()
         self.image = self._get_os()
         self.location = self._get_location()
@@ -181,6 +187,29 @@ class NetActuateComputeState(object):
     ###
     # Section: Helper functions that do not modify anything
     ##
+    def _check_valid_mbpkgid(self):
+
+     avail_nodes = self.conn.list_nodes()
+
+     mbpkgid = None
+
+     for n in avail_nodes:
+       if n.state == 'terminated':
+         continue
+
+       if n.name == self.hostname:
+         if mbpkgid is not None:
+           self.module.fail_json(msg= "Failed resolving hostname to mbpkgid because multiple instances of the hostname exist, please specify mbpkgid for this node.")
+           break
+
+         mbpkgid = n.id
+
+     if self.mbpkgid is not None and mbpkgid != self.mbpkgid:
+       self.module.fail_json(msg= "Hostname {2} mbpkgid = {} from the Ansible inventory disagrees with mbpkgid = {} from the API."
+                             .format(self.hostname, self.module.params.get('mbpkgid'), mbpkgid))
+
+     return mbpkgid
+
     def _check_valid_hostname(self):
         """The user will set the hostname so we have to check if it's
         valid.
@@ -265,7 +294,7 @@ class NetActuateComputeState(object):
                              if loc.name == loc_arg or loc.id == loc_arg]
 
         if not loc_possible_list:
-            _msg = "Image '%s' not found" % loc_arg
+            _msg = "Location '%s' not found" % loc_arg
             self.module.fail_json(msg=_msg)
         else:
             location = loc_possible_list[0]
@@ -291,6 +320,7 @@ class NetActuateComputeState(object):
     def _get_node(self):
         """Just try to get the node, otherwise return failure"""
         node = None
+
         try:
             node = self.conn.ex_get_node(self.mbpkgid)
         except Exception:
@@ -301,7 +331,14 @@ class NetActuateComputeState(object):
 
     def _get_job(self, job_id):
         """Get a specific job's status from the api"""
-        params = {'mbpkgid': self.mbpkgid, 'job_id': job_id}
+
+	if self.mbpkgid:
+          params = {
+            'job_id': job_id,
+            'mbpkgid': self.mbpkgid,
+          }
+        else:
+          params = { 'job_id': job_id }
         try:
             result = self.conn.connection.request(
                 API_ROOT + '/cloud/serverjob',
@@ -346,11 +383,23 @@ class NetActuateComputeState(object):
         timeout = 600
         interval = 5
         try:
-            job_id = result['id']
+            job_id = result['build']['id']
         except Exception as e:
-            self.module.fail_json(
-                msg="Failed to get job_id from result {} for node {}"
-                .format(self.hostname, result))
+            try:
+              job_id = result['id']
+            except Exception as e:
+              self.module.fail_json(
+                  msg="Failed to get job_id for node {} from result {}"
+                  .format(self.hostname, result))
+
+	if self.mbpkgid is None:
+            try:
+                self.mbpkgid = result['mbpkgid']
+            except Exception as e:
+                self.module.fail_json(
+                    msg="Failed to get mbpkgid for node {} from result {}"
+                    .format(self.hostname, result))
+
         status = {}
         for i in range(0, timeout, int(interval)):
             status = self._get_job(job_id)
@@ -382,7 +431,11 @@ class NetActuateComputeState(object):
                 'image': self.image.id,
                 'fqdn': self.hostname,
                 'location': self.location.id,
-                'ssh_key': self.ssh_key
+                'ssh_key': self.ssh_key,
+                'plan': self.plan,
+                'package_billing': self.package_billing,
+                'package_billing_contract_id': self.contract_id,
+		'unique': self.unique,
             }
         else:
             # node exists
@@ -391,13 +444,17 @@ class NetActuateComputeState(object):
                 'image': self.image.id,
                 'fqdn': self.hostname,
                 'location': self.node.extra['location'],
-                'ssh_key': self.ssh_key
+                'ssh_key': self.ssh_key,
+		'plan': self.plan,
+		'package_billing': self.package_billing,
+                'package_billing_contract_id': self.contract_id,
+		'unique': self.unique,
             }
 
         # start the build process and get the job_id in the result
         try:
             result = self.conn.connection.request(
-                API_ROOT + '/cloud/server/build',
+                API_ROOT + '/cloud/buy_build',
                 data=json.dumps(params),
                 method='POST'
             ).object
@@ -485,7 +542,12 @@ class NetActuateComputeState(object):
 
     def ensure_node_terminated(self):
         """Calls the api endpoint to delete the node and returns the result"""
-        params = {'mbpkgid': self.node.id}
+        params = {
+            'mbpkgid': self.node.id,
+            'cancel_billing': True,
+        }
+        print('calling delete')
+
         try:
             result = self.conn.connection.request(
                 API_ROOT + '/cloud/server/delete', data=json.dumps(params),
@@ -495,7 +557,9 @@ class NetActuateComputeState(object):
                 msg="Failed to delete node for node {0} with: {1}"
                 .format(self.hostname, str(e)))
 
-        # wait for job to complete and state to be verified
+        print('done')
+
+
         self.wait_for_job_complete(result=result, state='terminated')
 
     def __call__(self):
@@ -510,19 +574,14 @@ class NetActuateComputeState(object):
                     changed:    bool
                     device:     dict of device data
         """
-        ###
-        # We should already have our self.node and it should be None
-        # if the node doesn't exist (package never built) or a Node object
-        #
-        # DIE if the node has never been built and we are being asked
-        # to uninstall it since we don't have a node that is even
-        # checkable
-        ###
+
         if self.node is None and self.desired_state == 'terminated':
-            self.module.fail_json(
-                msg="Cannot uninstall a node that doesn't exist."
-                "Please build the package first,"
-                "then you can uninstall it.")
+            return {
+                'changed': False,
+                'device': {
+                    'state': 'terminated',
+                 },
+            }
 
         # We only need to do any work if the below conditions exist
         # otherwise we will return the defaults
@@ -558,11 +617,15 @@ def main():
                 default=os.environ.get(HOSTVIRTUAL_API_KEY_ENV_VAR),
                 no_log=True),
             hostname=dict(required=True, aliases=['name']),
-            mbpkgid=dict(required=True),
+            mbpkgid=dict(required=False),
             operating_system=dict(required=True),
             ssh_public_key=dict(required=True),
             location=dict(required=True),
             state=dict(choices=ALLOWED_STATES, default='running'),
+            plan=dict(required=False),
+            package_billing=dict(default='usage'),
+            contract_id=dict(required=False),
+            unique=dict(default=True),
         ),
     )
 
