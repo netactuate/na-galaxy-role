@@ -1,0 +1,18 @@
+namespace: "netactuate"
+name: "netactuate-compute-node"
+version: "2.0.2"
+readme: "README.md"
+authors:
+ - "Dennis Durling"
+ - "Josh McBeth"
+description: "NetActuate Compute Node Controller"
+license:
+ - "GPLv2"
+tags:
+ - netactuate
+ - cloud
+ - compute
+ - build
+ - terminate
+ - running
+ - stopped
