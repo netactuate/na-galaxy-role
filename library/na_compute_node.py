@@ -160,7 +160,7 @@ class NetActuateComputeState(object):
         # set some local variables used inside most if not all methods
         ##
         # from the api connection
-        self.avail_locs = self.conn.list_locations()
+        self.avail_locs = self._list_locations()
         self.avail_oses = self.conn.list_images()
 
         # directly from the module parameters
@@ -183,6 +183,21 @@ class NetActuateComputeState(object):
         # Set our default return components
         self.node = self._get_node()
         self.changed = False
+
+    def _list_locations(self):
+        result = self.conn.connection.request(API_ROOT + '/cloud/locations/').object
+        locations = []
+        for k in result:
+            dc = result[k]
+            locations.append(
+		{
+                    'id': dc['id'],
+                    'name': dc['name'],
+                    'country': dc["name"].split(',')[1].replace(" ", ""),
+                }
+            )
+        return sorted(locations, key=lambda x: int(x['id']))
+
 
     ###
     # Section: Helper functions that do not modify anything
@@ -291,7 +306,7 @@ class NetActuateComputeState(object):
         loc_arg = self.module.params.get('location')
         location = None
         loc_possible_list = [loc for loc in self.avail_locs
-                             if loc.name == loc_arg or loc.id == loc_arg]
+                             if loc['name'] == loc_arg or loc['id'] == loc_arg]
 
         if not loc_possible_list:
             _msg = "Location '%s' not found" % loc_arg
@@ -430,7 +445,7 @@ class NetActuateComputeState(object):
                 'mbpkgid': self.mbpkgid,
                 'image': self.image.id,
                 'fqdn': self.hostname,
-                'location': self.location.id,
+                'location': self.location['id'],
                 'ssh_key': self.ssh_key,
                 'plan': self.plan,
                 'package_billing': self.package_billing,
